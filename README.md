@@ -105,6 +105,20 @@ python3 scripts/update_cdn_list.py --target-count 100 --output configs/cdn.list
 
 脚本会读取中国大陆公共 DNS 解析器列表，并补充少量 APNIC 中国 IPv4 地址段采样，再通过 Google DNS-over-HTTPS 的 EDNS Client Subnet 参数解析 Xbox 下载域名。`--target-count 100` 表示最多写入 100 个候选 IP，不会为了凑满 100 个而长时间采样；新结果不足时，会用当前 `configs/cdn.list` 中的旧候选补足。
 
+默认情况下，脚本会对收集到的新候选和当前 `configs/cdn.list` 中的旧候选执行一次真实 Xbox HTTP Range 下载验证。只有能通过 `assets1.xboxlive.com`、`assets2.xboxlive.com` 或 `dlassets.xboxlive.com` 返回有效下载数据的 IP，才会优先写入新列表。更新脚本只验证能否实际下载，不计算速度，也不按速度排序；真实快慢仍由正式测速脚本判断。
+
+如果只想保留旧版“仅收集 DNS 结果，不做 HTTP 探测”的行为，可以使用：
+
+```bash
+python3 scripts/update_cdn_list.py --target-count 100 --output configs/cdn.list --skip-probe
+```
+
+也可以调整验证超时：
+
+```bash
+python3 scripts/update_cdn_list.py --probe-timeout 8
+```
+
 GitHub Actions 已配置为北京时间每周一 00:00 自动更新 `configs/cdn.list`，也可以在 Actions 页面手动触发。
 
 ## 康康结果：

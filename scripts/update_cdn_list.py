@@ -30,6 +30,13 @@ XBOX_DOWNLOAD_DOMAINS = (
     "assets2.xboxlive.com",
     "dlassets.xboxlive.com",
 )
+XBOX_PROBE_PATH = (
+    "5/795514b6-aad9-4c1c-ac2a-60c1492d7f31/"
+    "0c57204f-f4f0-4bf6-b119-b7afc231994d/"
+    "0.0.61375.0.6574fcb5-72f2-4c85-98c1-bd1059c79934/"
+    "Destiny2_0.0.61375.0_neutral__z7wx9v9k22rmg"
+)
+XBOX_PROBE_RANGE = "33543139328-33544187903"
 
 # 中国大陆常见公共 DNS / 运营商 DNS。Public-DNS.info 临时不可用时使用这些
 # 种子生成 ECS 子网，保证脚本仍能收集一批国内视角的解析结果。
@@ -133,6 +140,23 @@ def parse_args():
         type=float,
         default=1.0,
         help="直连公共 DNS 的 UDP 查询超时时间，单位秒，默认 1。",
+    )
+    parser.add_argument(
+        "--skip-probe",
+        action="store_true",
+        help="跳过真实 HTTP 下载探测，保留旧版仅按 DNS 结果生成列表的行为。",
+    )
+    parser.add_argument(
+        "--probe-timeout",
+        type=float,
+        default=5.0,
+        help="单个 CDN IP 的 HTTP 探测超时时间，单位秒，默认 5。",
+    )
+    parser.add_argument(
+        "--probe-read-bytes",
+        type=int,
+        default=262144,
+        help="每个 Host 最多读取的探测字节数，默认 262144。",
     )
     return parser.parse_args()
 
@@ -450,6 +474,79 @@ def build_final_list(new_ips, existing_ips, target_count):
     return merged[:target_count]
 
 
+def probe_cdn_ip(ip_addr, timeout, read_bytes):
+    """用真实 Xbox 下载请求验证单个 CDN IP 是否可用。
+
+    DNS 解析只能说明某个 IP 曾被返回为候选边缘节点，不能保证它能服务当前
+    Xbox 下载 Host 和文件路径。这里使用与测速脚本一致的测试文件，给直连 IP
+    请求补上 Host 头，并读取少量 Range 数据；只要任一 Xbox 下载域名能返回
+    有效数据，就认为该 IP 是可下载候选。这里不计算速度，避免更新列表时执行
+    完整测速，真实快慢仍交给 XboxSpeedTest 脚本处理。
+    """
+    request_url = "http://{}/{}".format(ip_addr, XBOX_PROBE_PATH)
+
+    for domain in XBOX_DOWNLOAD_DOMAINS:
+        request = urllib.request.Request(
+            request_url,
+            headers={
+                "Host": domain,
+                "Range": "bytes={}".format(XBOX_PROBE_RANGE),
+                "User-Agent": "XboxSpeedTest-CDN-Prober/1.0",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status_code = response.getcode()
+                if status_code not in (200, 206):
+                    continue
+
+                remaining_bytes = read_bytes
+                received_bytes = 0
+                while remaining_bytes > 0:
+                    chunk = response.read(min(65536, remaining_bytes))
+                    if not chunk:
+                        break
+                    received_bytes += len(chunk)
+                    remaining_bytes -= len(chunk)
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            continue
+
+        if received_bytes > 0:
+            return {
+                "ip": ip_addr,
+                "domain": domain,
+            }
+
+    return None
+
+
+def probe_cdn_ips(cdn_ips, timeout, read_bytes, workers):
+    """并发验证 CDN IP，并按候选输入顺序返回可下载结果。"""
+    probe_results = [None] * len(cdn_ips)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for index, ip_addr in enumerate(cdn_ips):
+            future = executor.submit(probe_cdn_ip, ip_addr, timeout, read_bytes)
+            futures[future] = index
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+            if result is not None:
+                probe_results[futures[future]] = result
+
+    return [result for result in probe_results if result is not None]
+
+
+def build_probe_first_list(probe_results, target_count):
+    """根据可下载验证结果生成最终列表。"""
+    probed_ips = [result["ip"] for result in probe_results]
+    return deduplicate(probed_ips)[:target_count]
+
+
 def write_atomic(output_path, cdn_ips):
     """使用临时文件原子替换输出文件。"""
     output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -482,6 +579,10 @@ def main():
         raise ValueError("--max-resolvers 不能小于 0。")
     if args.max_apnic_subnets < 0:
         raise ValueError("--max-apnic-subnets 不能小于 0。")
+    if args.probe_timeout <= 0:
+        raise ValueError("--probe-timeout 必须大于 0。")
+    if args.probe_read_bytes <= 0:
+        raise ValueError("--probe-read-bytes 必须大于 0。")
 
     fetched_resolvers = fetch_china_resolvers(args.resolver_url, args.timeout)
     resolvers = build_resolvers(fetched_resolvers, args.max_resolvers)
@@ -500,18 +601,46 @@ def main():
         args.workers,
     )
     existing_ips = read_existing_ips(args.output)
-    final_ips = build_final_list(new_ips, existing_ips, args.target_count)
+    if args.skip_probe:
+        probe_results = []
+        final_ips = build_final_list(new_ips, existing_ips, args.target_count)
+    else:
+        # 新旧候选一起探测：新 DNS 结果负责发现增量，旧列表负责保留历史上
+        # 可用但本轮 DNS 没返回的节点，最终只优先写入真实可下载的 IP。
+        probe_candidates = deduplicate(list(new_ips) + list(existing_ips))
+        probe_results = probe_cdn_ips(
+            probe_candidates,
+            args.probe_timeout,
+            args.probe_read_bytes,
+            args.workers,
+        )
+        final_ips = build_probe_first_list(probe_results, args.target_count)
+
+        # 如果当前运行环境完全无法访问测试文件，避免把现有列表清空；这种情况
+        # 通常是网络出口、代理或 GitHub Actions 临时网络问题。
+        if not final_ips:
+            final_ips = build_final_list(new_ips, existing_ips, args.target_count)
 
     write_atomic(args.output, final_ips)
 
     print(
-        "Collected {} new IPs, merged {} existing IPs, wrote {} IPs to {}.".format(
+        "Collected {} new IPs, merged {} existing IPs, probed {} usable IPs, wrote {} IPs to {}.".format(
             len(new_ips),
             len(existing_ips),
+            len(probe_results),
             len(final_ips),
             args.output,
         )
     )
+    if probe_results:
+        print("Validated CDN IPs:")
+        for result in probe_results[:10]:
+            print(
+                "  {} via {}".format(
+                    result["ip"],
+                    result["domain"],
+                )
+            )
 
 
 if __name__ == "__main__":
