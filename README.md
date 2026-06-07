@@ -9,7 +9,7 @@ Xbox 游戏下载 CDN 优选工具。项目通过真实 HTTP Range 下载测速�
 
 - 支持 macOS、Linux、OpenWrt 和 Windows PowerShell。
 - 从 `configs/cdn.list` 读取候选 CDN IP，自动去重后测速。
-- 支持并发测速，默认 4 个任务。
+- 使用单线程顺序测速，避免并发下载互相抢占带宽导致速度结果失真。
 - 自动输出 hosts、SmartDNS、DNSMasq 配置文件。
 - 提供 CDN 候选列表更新脚本，可通过 GitHub Actions 定时或手动更新。
 - 更新候选列表时会验证 IP 是否能实际下载 Xbox 内容，避免大量无效节点进入列表。
@@ -52,12 +52,6 @@ chmod +x XboxSpeedTest.sh
 ./XboxSpeedTest.sh
 ```
 
-指定并发数量：
-
-```bash
-./XboxSpeedTest.sh --jobs 4
-```
-
 如果 `curl` 不在默认 `PATH` 中，可以通过 `CURL_BIN` 指定：
 
 ```bash
@@ -68,12 +62,6 @@ CURL_BIN=/usr/bin/curl ./XboxSpeedTest.sh
 
 ```powershell
 .\XboxSpeedTest.ps1
-```
-
-指定并发数量：
-
-```powershell
-.\XboxSpeedTest.ps1 -Jobs 4
 ```
 
 如果系统禁止执行脚本，可以临时使用：

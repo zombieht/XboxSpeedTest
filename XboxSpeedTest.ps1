@@ -13,10 +13,7 @@ param(
     [string]$CurlPath = "curl.exe",
 
     # CDN IP 列表路径。
-    [string]$ConfigPath = "configs/cdn.list",
-
-    # 并发测速数量。默认 4，避免并发过高影响测速准确性。
-    [int]$Jobs = 4
+    [string]$ConfigPath = "configs/cdn.list"
 )
 
 Set-StrictMode -Version Latest
@@ -48,7 +45,7 @@ function ConvertTo-TrimmedLine {
     return ($Line -replace "\s", "")
 }
 
-function Start-CdnSpeedJob {
+function Invoke-CdnSpeedTest {
     param(
         [Parameter(Mandatory = $true)]
         [int]$Index,
@@ -60,59 +57,35 @@ function Start-CdnSpeedJob {
         [string]$IpAddress
     )
 
-    # 使用后台 Job 控制并发。脚本块只依赖显式传入的参数，避免父作用域变量丢失。
-    return Start-Job -ArgumentList @(
-        $Index,
-        $AllCount,
-        $IpAddress,
-        $CurlPath,
-        $CurlMaxTime,
-        $CurlRange,
-        $CurlSpeedTime,
-        $CurlTestUrl,
-        $CurlHost
-    ) -ScriptBlock {
-        param(
-            [int]$JobIndex,
-            [int]$JobAllCount,
-            [string]$JobIpAddress,
-            [string]$JobCurlPath,
-            [int]$JobCurlMaxTime,
-            [string]$JobCurlRange,
-            [int]$JobCurlSpeedTime,
-            [string]$JobCurlTestUrl,
-            [string]$JobCurlHost
-        )
+    $speedBytes = "0"
+    $speedKb = 0
 
-        $speedBytes = "0"
+    try {
+        # 单线程逐个 IP 测速，避免多个 Range 下载同时抢占带宽导致 speed_download 失真。
+        $speedBytes = & $CurlPath `
+            -s `
+            -o NUL `
+            -m $CurlMaxTime `
+            -r $CurlRange `
+            -y $CurlSpeedTime `
+            --url "http://$IpAddress/$CurlTestUrl" `
+            -H "Host: $CurlHost" `
+            -w "%{speed_download}" 2>$null
+
+        # curl 达到 -m 最大耗时时会返回 28，但 -w 仍会输出已下载阶段的速度。
+        # 这里按 speed_download 是否可解析来计算速度，避免把有效测速误判为 0。
+        if ($speedBytes -match "^[0-9]+(\.[0-9]+)?$") {
+            $speedKb = [int][Math]::Floor([double]$speedBytes / 1024)
+        }
+    } catch {
         $speedKb = 0
+    }
 
-        try {
-            $speedBytes = & $JobCurlPath `
-                -s `
-                -o NUL `
-                -m $JobCurlMaxTime `
-                -r $JobCurlRange `
-                -y $JobCurlSpeedTime `
-                --url "http://$JobIpAddress/$JobCurlTestUrl" `
-                -H "Host: $JobCurlHost" `
-                -w "%{speed_download}" 2>$null
-
-            # curl 达到 -m 最大耗时时会返回 28，但 -w 仍会输出已下载阶段的速度。
-            # 这里按 speed_download 是否可解析来计算速度，避免把有效测速误判为 0。
-            if ($speedBytes -match "^[0-9]+(\.[0-9]+)?$") {
-                $speedKb = [int][Math]::Floor([double]$speedBytes / 1024)
-            }
-        } catch {
-            $speedKb = 0
-        }
-
-        [PSCustomObject]@{
-            Index = $JobIndex
-            AllCount = $JobAllCount
-            IpAddress = $JobIpAddress
-            SpeedKb = $speedKb
-        }
+    return [PSCustomObject]@{
+        Index = $Index
+        AllCount = $AllCount
+        IpAddress = $IpAddress
+        SpeedKb = $speedKb
     }
 }
 
@@ -147,11 +120,6 @@ function Write-OutputFiles {
 }
 
 function Main {
-    if ($Jobs -lt 1) {
-        Write-Error "-Jobs 必须是大于 0 的整数。"
-        exit 1
-    }
-
     if (-not (Test-CommandExists -Command $CurlPath)) {
         Write-Error "未找到 curl.exe，请先安装 curl，或通过 -CurlPath 指定 curl.exe 路径。"
         exit 1
@@ -184,48 +152,20 @@ function Main {
 
     $bestIp = ""
     $bestSpeed = 0
-    $runningJobs = @()
-    $results = @()
-
-    function Receive-SpeedJobResult {
-        param(
-            [Parameter(Mandatory = $true)]
-            [object]$FinishedJob
-        )
-
-        $jobResult = Receive-Job -Job $FinishedJob
-        Remove-Job -Job $FinishedJob
-        if ($null -ne $jobResult) {
-            Write-Host ("[TEST {0}/{1}] [Address: {2}] ....... {3}KB/s " -f `
-                $jobResult.Index, `
-                $jobResult.AllCount, `
-                $jobResult.IpAddress, `
-                $jobResult.SpeedKb)
-        }
-
-        return $jobResult
-    }
 
     for ($ipIndex = 0; $ipIndex -lt $cdnIps.Count; $ipIndex += 1) {
-        while ($runningJobs.Count -ge $Jobs) {
-            $finishedJob = Wait-Job -Job $runningJobs -Any
-            $results += Receive-SpeedJobResult -FinishedJob $finishedJob
-            $runningJobs = @($runningJobs | Where-Object { $_.Id -ne $finishedJob.Id })
-        }
-
-        $runningJobs += Start-CdnSpeedJob `
+        # 当前 IP 完成测速后再进入下一个 IP，保证每次测速独占当前网络带宽。
+        $result = Invoke-CdnSpeedTest `
             -Index ($ipIndex + 1) `
             -AllCount $allCount `
             -IpAddress $cdnIps[$ipIndex]
-    }
 
-    while ($runningJobs.Count -gt 0) {
-        $finishedJob = Wait-Job -Job $runningJobs -Any
-        $results += Receive-SpeedJobResult -FinishedJob $finishedJob
-        $runningJobs = @($runningJobs | Where-Object { $_.Id -ne $finishedJob.Id })
-    }
+        Write-Host ("[TEST {0}/{1}] [Address: {2}] ....... {3}KB/s " -f `
+            $result.Index, `
+            $result.AllCount, `
+            $result.IpAddress, `
+            $result.SpeedKb)
 
-    foreach ($result in ($results | Sort-Object -Property Index)) {
         if ($result.SpeedKb -gt $bestSpeed) {
             $bestSpeed = $result.SpeedKb
             $bestIp = $result.IpAddress
