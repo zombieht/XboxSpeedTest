@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# XboxSpeedTest 测速生成的本地输出文件
+hosts_best_output.txt
+smartdns_best_output.txt
+merlin_dnsmasq_best_output.txt
+openwrt_dnsmasq_best_output.txt

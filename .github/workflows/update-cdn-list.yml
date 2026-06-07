@@ -1,0 +1,40 @@
+name: Update Xbox CDN list
+
+on:
+  schedule:
+    # GitHub Actions 使用 UTC 时间；这里对应北京时间每周一 00:00。
+    - cron: "0 16 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-cdn-list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Update CDN list
+        run: python3 scripts/update_cdn_list.py --target-count 100 --output configs/cdn.list --workers 32
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet -- configs/cdn.list; then
+            echo "configs/cdn.list has no changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add configs/cdn.list
+          git commit -m "chore: update xbox cdn list"
+          git push

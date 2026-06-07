@@ -33,32 +33,88 @@ dlassets.xboxlive.cn
 
 工具原料：
 
-1.Windows & Python 2.7（不是python3）
+1.一台 Windows、macOS、Linux 或路由器系统设备
 
 2.一台能刷写（LEDE，梅林，padavan）等第三方系统的路由器
 
 3.DNSMASQ 或者SMARTDNS
 
+4.curl
 
-我们写了一个简易的脚本来快速完成地址筛选测速的结果。
+我们写了两个简易脚本来快速完成地址筛选测速的结果。
 
 去Release页面下载最新的脚本。
 打开```./configs/cdn.list```把XBOX下载服务器的IP列表添加进去。这里我已经预先放好了，如果你找到了更好的列表，可以自行修改。
 
-在cmd下运行XboxSpeedTest.py，等待十分钟，优选测速完毕后会提示最佳服务器，并写入结果。
+### macOS / Linux / OpenWrt
 
+在终端下运行：
+
+```bash
+chmod +x XboxSpeedTest.sh
+./XboxSpeedTest.sh
 ```
-python XboxSpeedTest.py
+
+脚本默认使用 4 个并发测速任务，也可以手动指定：
+
+```bash
+./XboxSpeedTest.sh --jobs 4
 ```
+
+如果 curl 不在默认 PATH 中，可以通过 `CURL_BIN` 指定：
+
+```bash
+CURL_BIN=/usr/bin/curl ./XboxSpeedTest.sh
+```
+
+### Windows PowerShell
+
+在 PowerShell 下运行：
+
+```powershell
+.\XboxSpeedTest.ps1
+```
+
+脚本默认使用 4 个并发测速任务，也可以手动指定：
+
+```powershell
+.\XboxSpeedTest.ps1 -Jobs 4
+```
+
+如果系统禁止执行脚本，可以临时使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\XboxSpeedTest.ps1
+```
+
+如果 curl.exe 不在默认 PATH 中，可以通过参数指定：
+
+```powershell
+.\XboxSpeedTest.ps1 -CurlPath "C:\Windows\System32\curl.exe"
+```
+
+运行后等待十分钟左右，优选测速完毕后会提示最佳服务器，并写入结果。
+
+### 更新 CDN 候选列表
+
+项目提供了一个无第三方依赖的 Python 脚本，用于按中国大陆网络视角收集 Xbox 下载 CDN 候选 IP：
+
+```bash
+python3 scripts/update_cdn_list.py --target-count 100 --output configs/cdn.list
+```
+
+脚本会读取中国大陆公共 DNS 解析器列表，并补充少量 APNIC 中国 IPv4 地址段采样，再通过 Google DNS-over-HTTPS 的 EDNS Client Subnet 参数解析 Xbox 下载域名。`--target-count 100` 表示最多写入 100 个候选 IP，不会为了凑满 100 个而长时间采样；新结果不足时，会用当前 `configs/cdn.list` 中的旧候选补足。
+
+GitHub Actions 已配置为北京时间每周一 00:00 自动更新 `configs/cdn.list`，也可以在 Actions 页面手动触发。
+
 ## 康康结果：
 ```
 [LOG]All CDN Test complete. Have fun!
 [LOG]Your Best CDN is 203.69.138.26, 7388KB/s!
 ```
 
-结果 hosts_best_output.txt 对应hosts，dnsmasq_best_output.txt 对应dnsmasq，smartdns_best_output.txt对应smartdns，把以上结果复制到路由或者hosts中，重启xbox试试下载吧。
+结果 `hosts_best_output.txt` 对应 hosts，`smartdns_best_output.txt` 对应 SmartDNS，`merlin_dnsmasq_best_output.txt` 和 `openwrt_dnsmasq_best_output.txt` 对应 DNSMasq，把以上结果复制到路由或者 hosts 中，重启 Xbox 试试下载吧。
 
 ## 引用：
 http://wap.a9vg.com/thread-5330577-1-1.html?t=1543674360 Xbox 下载更新停止完美解决方案
 https://bbs.a9vg.com/thread-5478226-1-1.html Xbox One 当前国内CDN状态分析
-
