@@ -1,9 +1,9 @@
 name: Update Xbox CDN list
 
 on:
-  schedule:
-    # GitHub Actions 使用 UTC 时间；这里对应北京时间每周一 00:00。
-    - cron: "0 16 * * 0"
+  # schedule:
+  #   # GitHub Actions 使用 UTC 时间；这里对应北京时间每周一 00:00。
+  #   - cron: "0 16 * * 0"
   workflow_dispatch:
 
 permissions:
